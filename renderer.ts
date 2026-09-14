@@ -12,7 +12,7 @@ import * as fs from 'fs';
 import * as YAML from 'yaml';
 import { Base64 } from 'js-base64';
 
-import { FileSystemAdapter, MarkdownRenderer, MarkdownView, Notice } from 'obsidian';
+import { Component, FileSystemAdapter, MarkdownRenderer, MarkdownView, Notice } from 'obsidian';
 
 import PandocPlugin from './main';
 import { PandocPluginSettings } from './global';
@@ -22,22 +22,41 @@ import { outputFormats } from 'pandoc';
 
 // Note: parentFiles is for internal use (to prevent recursively embedded notes)
 // inputFile must be an absolute file path
-export default async function render (plugin: PandocPlugin, view: MarkdownView,
+export default async function render (plugin: PandocPlugin, view: MarkdownView | null,
     inputFile: string, outputFormat: string, parentFiles: string[] = []):
     Promise<{ html: string, metadata: { [index: string]: string } }>
 {
     // Use Obsidian's markdown renderer to render to a hidden <div>
-    const markdown = view.data;
+    // If there's no active MarkdownView (for example when the export command is
+    //  run while the note isn't focused), fall back to reading the file from disk
+    const markdown = view ? view.data : await fs.promises.readFile(inputFile, 'utf8');
+
+    // MarkdownRenderer requires a real Component so that asynchronously rendered
+    //  children (Mermaid diagrams, MathJax, etc.) have a proper lifecycle. A
+    //  MarkdownView is a Component, but for embedded notes and when no view is
+    //  available we create a throwaway one. Passing a plain `{ data }` object
+    //  makes Mermaid rendering fail.
+    let component: Component;
+    let ownsComponent = false;
+    if (view instanceof Component) {
+        component = view;
+    } else {
+        component = new Component();
+        component.load();
+        ownsComponent = true;
+    }
+
     const wrapper = document.createElement('div');
     wrapper.style.display = 'hidden';
     document.body.appendChild(wrapper);
-    await MarkdownRenderer.renderMarkdown(markdown, wrapper, path.dirname(inputFile), view);
+    await MarkdownRenderer.renderMarkdown(markdown, wrapper, path.dirname(inputFile), component);
 
     // Post-process the HTML in-place
     await postProcessRenderedHTML(plugin, inputFile, wrapper, outputFormat,
         parentFiles, await mermaidCSS(plugin.settings, plugin.vaultBasePath()));
     let html = wrapper.innerHTML;
     document.body.removeChild(wrapper);
+    if (ownsComponent) component.unload();
 
     // If it's a top level note, make the HTML a standalone document - inject CSS, a <title>, etc.
     const metadata = getYAMLMetadata(markdown);
